@@ -2,6 +2,7 @@ jpsType: install
 jpsVersion: '1.8'
 id: harbor-registry
 name: Harbor Registry with HTTPS
+version: 1.0.0
 categories:
   - apps/dev-and-admin-tools
 logo: https://goharbor.io/img/logos/harbor-icon-color.png
