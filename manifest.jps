@@ -1,0 +1,253 @@
+jpsType: install
+jpsVersion: '1.8'
+id: harbor-registry
+name: Harbor Registry with HTTPS
+categories:
+  - apps/dev-and-admin-tools
+logo: https://goharbor.io/img/logos/harbor-icon-color.png
+homepage: https://goharbor.io/
+description: |
+  Harbor is an open source registry that secures artifacts with policies and role-based access control, 
+  ensures images are scanned and free from vulnerabilities, and signs images as trusted.
+
+ssl: true
+skipNodeEmails: true
+
+settings:
+  fields:
+    - name: harborVersion
+      caption: Harbor Version
+      type: list
+      values:
+        v2.13.1: v2.13.1 (Latest)
+        v2.12.0: v2.12.0 
+        v2.11.1: v2.11.1
+        v2.10.3: v2.10.3
+        v2.9.0: v2.9.0
+      default: v2.13.1
+      required: true
+
+nodes:
+  - nodeType: nginx
+    nodeGroup: bl
+    cloudlets: 8
+    displayName: Nginx Load Balancer with SSL
+    count: 1
+    env:
+      JELASTIC_EXPOSE: 443
+
+  - nodeType: dockerengine
+    nodeGroup: cp
+    cloudlets: 32
+    minCloudlets: 1
+    displayName: Harbor Core
+    count: 1
+    volumes:
+      - /var/lib/harbor
+    env:
+      JELASTIC_EXPOSE: false
+    links:
+      - sqldb:postgres
+      - nosqldb:redis
+
+  - nodeType: postgres17
+    nodeGroup: sqldb
+    cloudlets: 16
+    displayName: Harbor Database
+    count: 1
+
+  - nodeType: redis7
+    nodeGroup: nosqldb
+    cloudlets: 8
+    displayName: Harbor Redis
+    count: 1
+
+globals:
+  DB_PASSWORD: ${fn.password(20)}
+  REDIS_PASSWORD: ${fn.password(20)}
+  HARBOR_ADMIN_PASSWORD: ${fn.password(16)}
+  HARBOR_SECRET_KEY: ${fn.password(32)}
+
+onInstall:
+  - setupRedis
+  - setupDatabase
+  - installHarbor
+  - startServices
+
+actions:
+  setupDatabase:
+    - cmd[sqldb]:
+      - export PGPASSWORD=${nodes.sqldb.password}
+      - psql -U webadmin -d postgres -c "CREATE USER harbor WITH PASSWORD '${globals.DB_PASSWORD}';"
+      - psql -U webadmin -d postgres -c "CREATE DATABASE harbor OWNER harbor;"
+      - psql -U webadmin -d postgres -c "GRANT ALL PRIVILEGES ON DATABASE harbor TO harbor;"
+      - psql -U webadmin -d postgres -c "ALTER USER harbor CREATEDB;"
+      user: postgres
+
+  setupRedis:
+    - cmd[nosqldb]:
+      - echo "requirepass ${globals.REDIS_PASSWORD}" >> /etc/redis.conf
+      - systemctl restart redis
+      user: root
+
+  installHarbor:
+    - cmd[cp]: cd /tmp && wget -q https://github.com/goharbor/harbor/releases/download/${settings.harborVersion}/harbor-offline-installer-${settings.harborVersion}.tgz && tar xvf harbor-offline-installer-${settings.harborVersion}.tgz && mv harbor /opt/
+      user: root
+    - writeFile:
+        nodeGroup: cp
+        path: /opt/harbor/harbor.yml
+        body: |
+          hostname: ${env.domain}
+          
+          http:
+            port: 80
+          
+          harbor_admin_password: ${globals.HARBOR_ADMIN_PASSWORD}
+          
+          database:
+            password: ${globals.DB_PASSWORD}
+            host: ${nodes.sqldb.master.intIP}
+            port: 5432
+            db_name: harbor
+            username: harbor
+            ssl_mode: disable
+            max_idle_conns: 50
+            max_open_conns: 1000
+          
+          data_volume: /var/lib/harbor
+          
+          trivy:
+            ignore_unfixed: false
+            skip_update: false
+            offline_scan: false
+            security_check: vuln
+            insecure: false
+          
+          jobservice:
+            max_job_workers: 10
+            max_job_duration_hours: 24
+            job_loggers:
+              - STD_OUTPUT
+              - FILE
+            logger_sweeper_duration: 1 #days
+
+          notification:
+            webhook_job_max_retry: 10
+            webhook_job_http_client_timeout: 3 #seconds
+          
+          chart:
+            absolute_url: disabled
+          
+          log:
+            level: info
+            local:
+              rotate_count: 50
+              rotate_size: 200M
+              location: /var/log/harbor
+          
+          _version: ${settings.harborVersion}
+          
+          external_redis:
+            host: ${nodes.nosqldb.master.intIP}:6379
+            password: ${globals.REDIS_PASSWORD}
+            registry_db_index: 1
+            jobservice_db_index: 2
+            chartmuseum_db_index: 3
+            trivy_db_index: 5
+            idle_timeout_seconds: 30
+          
+          external_database:
+            harbor:
+              host: ${nodes.sqldb.master.intIP}
+              port: 5432
+              db_name: harbor
+              username: harbor
+              password: ${globals.DB_PASSWORD}
+              ssl_mode: disable
+              max_idle_conns: 2
+              max_open_conns: 0
+          
+          proxy:
+            http_proxy:
+            https_proxy:
+            no_proxy:
+            components:
+              - core
+              - jobservice
+              - trivy
+          # Enable purge _upload directories
+          upload_purging:
+            enabled: true
+            # remove files in _upload directories which exist for a period of time, default is one week.
+            age: 168h
+            # the interval of the purge operations
+            interval: 24h
+            dryrun: false
+          cache:
+            # not enabled by default
+            enabled: false
+            # keep cache for one day by default
+            expire_hours: 24
+            
+  startServices:
+    - cmd[cp]: cd /opt/harbor && ./install.sh --with-trivy
+      user: root
+    - writeFile:
+        nodeGroup: cp
+        path: /etc/systemd/system/harbor.service
+        body: |
+          [Unit]
+          Description=Harbor
+          After=docker.service systemd-networkd.service systemd-resolved.service
+          Requires=docker.service
+          Documentation=https://goharbor.io
+          
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          WorkingDirectory=/opt/harbor
+          ExecStart=/usr/local/bin/docker-compose -f docker-compose.yml up -d
+          ExecStop=/usr/local/bin/docker-compose -f docker-compose.yml down
+          TimeoutStartSec=0
+          
+          [Install]
+          WantedBy=multi-user.target
+    - cmd[cp]: systemctl enable harbor.service && systemctl start harbor.service
+      user: root
+    - restartNodes:
+        - nodeGroup: bl
+
+success: |
+  **Harbor Registry has been successfully installed!**
+  
+  **Access Information:**
+  - Harbor URL: https://${env.domain}
+  - Admin Username: admin
+  - Admin Password: ${globals.HARBOR_ADMIN_PASSWORD}
+  
+  **Architecture:**
+  - Nginx Load Balancer: Distributes traffic across Harbor instances
+  - Harbor Core: 2 instances for high availability
+  - PostgreSQL 17: Shared database backend
+  - Redis 7: Shared caching and job queues
+  
+  **Database Information:**
+  - Database Host: ${nodes.sqldb.master.intIP}
+  - Database Password: ${globals.DB_PASSWORD}
+  
+  **Redis Information:**
+  - Redis Host: ${nodes.nosqldb.master.intIP}
+  - Redis Password: ${globals.REDIS_PASSWORD}
+  
+  **Important Notes:**
+  - Harbor runs on HTTP (port 80) behind Nginx load balancer
+  - Nginx LB distributes traffic across 2 Harbor instances using least_conn
+  - Harbor is configured with Trivy vulnerability scanner
+  - All services are configured to start automatically on system boot
+  
+  **Next Steps:**
+  1. Login to Harbor web interface at https://${env.domain}
+  2. Create projects and configure users
+  3. Configure Docker clients to use the registry
+  4. Monitor load balancer health via /health endpoint
+  5. Scale Harbor instances as needed for increased load
