@@ -6,7 +6,7 @@ A comprehensive Jelastic JPS (Jelastic Packaging Standard) template for deployin
 
 Deploy Harbor registry to your Jelastic environment with a single click:
 
-[![Deploy to Jelastic](https://github.com/Ruk-Com-Cloud/simple-jps/blob/main/deploy-to-ruk-com.png?raw=true)](https://app.manage.ruk-com.cloud/?manifest=https://github.com/Ruk-Com-Cloud/harbor-jps-template/main/harbor-registry.jps)
+[![Deploy to Jelastic](https://github.com/Ruk-Com-Cloud/simple-jps/blob/main/deploy-to-ruk-com.png?raw=true)](https://app.manage.ruk-com.cloud/?manifest=https://github.com/Ruk-Com-Cloud/harbor-jps-template/main/menifest.jps)
 
 ## Features
 
